@@ -18,7 +18,7 @@ from collections import defaultdict
 import cerberus.server.server as server
 import cerberus.inspect.inspect as inspect
 import cerberus.invoke.command as runcommand
-import cerberus.kubernetes.client as kubecli
+import cerberus.kubernetes.client as cerberus_kubecli
 import cerberus.slack.slack_client as slackcli
 import cerberus.prometheus.client as promcli
 import cerberus.database.client as dbcli
@@ -121,25 +121,25 @@ def main(cfg):
             logging.error("Proper kubeconfig not set, please set proper kubeconfig path")
             print_final_status_json(-1, "Unknown", 1)
             sys.exit(1)
-        os.environ["KUBECONFIG"] = str(kubeconfig_path)
-        logging.info("Initializing client to talk to the Kubernetes cluster")
-        kubecli.initialize_clients(kubeconfig_path, request_chunk_size, cmd_timeout)
+        try:
+            os.environ["KUBECONFIG"] = str(kubeconfig_path)
+            # krkn-lib-kubernetes init
+            cerberus_kubecli.initialize_globals(kubeconfig_path, request_chunk_size, cmd_timeout)
+        except Exception:
+            cerberus_kubecli.initialize_globals(None, request_chunk_size, cmd_timeout)
 
         if "openshift-sdn" in watch_namespaces:
-            sdn_namespace = kubecli.check_sdn_namespace()
+            sdn_namespace = cerberus_kubecli.check_sdn_namespace()
             watch_namespaces = [namespace.replace("openshift-sdn", sdn_namespace) for namespace in watch_namespaces]
 
         # Check if all the namespaces under watch_namespaces are valid
-        watch_namespaces = kubecli.check_namespaces(watch_namespaces)
+        watch_namespaces = cerberus_kubecli.check_namespaces(watch_namespaces)
 
         # Cluster info
-        logging.info("Fetching cluster info")
-        cv = kubecli.get_clusterversion_string()
-        if cv != "":
-            logging.info(cv)
-        else:
-            logging.info("Cluster version CRD not detected, skipping")
-        logging.info("Server URL: %s" % kubecli.get_host())
+        # Need to get clusterversion
+        cv = ""
+        cerberus_host_url = cerberus_kubecli.get_host()
+        logging.info("Server URL: %s" % cerberus_host_url)
 
         # Run http server using a separate thread if cerberus is asked
         # to publish the status. It is served by the http server.
@@ -167,23 +167,8 @@ def main(cfg):
             logging.info("Detailed inspection of failed components has been enabled")
             inspect.delete_inspect_directory()
 
-        # get list of all master nodes with provided labels in the config
-        master_nodes = []
-        master_label = ""
-        if watch_master_schedulable["enabled"]:
-            master_label = watch_master_schedulable["label"]
-            nodes = kubecli.list_nodes(master_label)
-            if len(nodes) == 0:
-                logging.error(
-                    "No master node found for the label %s. Please check master node config." % (master_label)
-                )  # noqa
-                print_final_status_json(-1, "Unknown", 1)
-                sys.exit(1)
-            else:
-                master_nodes.extend(nodes)
-
         # Use cluster_info to get the api server url
-        api_server_url = kubecli.get_host() + "/healthz"
+        api_server_url = cerberus_host_url + "/healthz"
 
         # Counter for if api server is not ok
         api_fail_count = 0
@@ -232,7 +217,6 @@ def main(cfg):
                 iteration_start_time = time.time()
 
                 iteration += 1
-
                 # Read the config for info when slack integration is enabled
                 if slack_integration:
                     weekday = runcommand.invoke("date '+%A'")[:-1]
@@ -248,7 +232,7 @@ def main(cfg):
                 if iteration == 1:
 
                     pool.starmap(
-                        kubecli.namespace_sleep_tracker,
+                        cerberus_kubecli.namespace_sleep_tracker,
                         zip(watch_namespaces, repeat(pods_tracker), repeat(watch_namespaces_ignore_pattern)),
                     )
 
@@ -264,21 +248,21 @@ def main(cfg):
                 ) = pool.map(
                     smap,
                     [
-                        functools.partial(kubecli.is_url_available, api_server_url),
+                        functools.partial(cerberus_kubecli.is_url_available, api_server_url),
                         functools.partial(
-                            kubecli.process_master_taint, master_nodes, master_label, iteration, iter_track_time
+                            cerberus_kubecli.process_master_taint, watch_master_schedulable, iteration, iter_track_time
                         ),
-                        functools.partial(kubecli.process_nodes, watch_nodes, iteration, iter_track_time),
+                        functools.partial(cerberus_kubecli.process_nodes, watch_nodes, iteration, iter_track_time),
                         functools.partial(
-                            kubecli.process_cluster_operator,
+                            cerberus_kubecli.process_cluster_operator,
                             distribution,
                             watch_cluster_operators,
                             iteration,
                             iter_track_time,
                         ),
-                        functools.partial(kubecli.process_routes, watch_url_routes, iter_track_time),
+                        functools.partial(cerberus_kubecli.process_routes, watch_url_routes, iter_track_time),
                         functools.partial(
-                            kubecli.monitor_namespaces_status,
+                            cerberus_kubecli.monitor_namespaces_status,
                             watch_namespaces,
                             watch_terminating_namespaces,
                             iteration,
@@ -286,7 +270,6 @@ def main(cfg):
                         ),
                     ],
                 )
-
                 # Increment api_fail_count if api server url is not ok
                 if not server_status:
                     api_fail_count += 1
@@ -300,7 +283,7 @@ def main(cfg):
                 # Monitor all the namespaces parallely
                 watch_namespaces_start_time = time.time()
                 pool.starmap(
-                    kubecli.process_namespace,
+                    cerberus_kubecli.process_namespace,
                     zip(
                         repeat(iteration),
                         watch_namespaces,
@@ -392,7 +375,7 @@ def main(cfg):
 
                 if distribution == "openshift":
                     watch_csrs_start_time = time.time()
-                    csrs = kubecli.get_csrs()
+                    csrs = cerberus_kubecli.get_csrs()
                     pending_csr = []
                     for csr in csrs["items"]:
                         # find csr status
@@ -488,7 +471,7 @@ def main(cfg):
 
                 # Track pod crashes/restarts during the sleep interval in all namespaces parallely
                 multiprocessed_output = pool.starmap(
-                    kubecli.namespace_sleep_tracker,
+                    cerberus_kubecli.namespace_sleep_tracker,
                     zip(watch_namespaces, repeat(pods_tracker), repeat(watch_namespaces_ignore_pattern)),
                 )
 

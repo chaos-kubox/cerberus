@@ -9,3 +9,4 @@ slack_sdk
 pyfiglet
 prometheus_api_client
 coverage
+krkn-lib>=1.4.2
